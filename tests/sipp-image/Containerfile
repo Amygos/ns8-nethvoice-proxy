@@ -1,0 +1,39 @@
+# SIPp with SSL + PCAP, built from source.
+# Used by both the local pytest e2e harness and Robot Framework tests on a
+# real NS8 node (same image, same flags).
+#
+# Build & publish:
+#   buildah bud -t ghcr.io/nethesis/sipp:dev tests/sipp-image/
+#   podman push ghcr.io/nethesis/sipp:dev
+#
+# Run (host network):
+#   podman run --rm -i --network host \
+#       -v $PWD/tests/e2e/sipp_scenarios:/scn:ro \
+#       ghcr.io/nethesis/sipp:dev \
+#       127.0.0.1:5060 -sf /scn/uac_basic_call.xml -i 127.0.0.2 ...
+
+FROM debian:12-slim AS build
+
+ARG SIPP_VERSION=3.7.7
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential cmake ca-certificates curl \
+        libssl-dev libpcap-dev libncurses-dev libsctp-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN curl -fsSL "https://github.com/SIPp/sipp/releases/download/v${SIPP_VERSION}/sipp-${SIPP_VERSION}.tar.gz" \
+        | tar xz \
+    && cd sipp-${SIPP_VERSION} \
+    && cmake -DUSE_SSL=1 -DUSE_PCAP=1 -DUSE_SCTP=1 . \
+    && make -j"$(nproc)" \
+    && install -m 0755 sipp /usr/local/bin/sipp
+
+FROM debian:12-slim
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libssl3 libpcap0.8 libncurses6 libncursesw6 libtinfo6 libsctp1 \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+COPY --from=build /usr/local/bin/sipp /usr/local/bin/sipp
+ENTRYPOINT ["/usr/local/bin/sipp"]

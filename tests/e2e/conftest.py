@@ -55,21 +55,29 @@ def _wait_udp_listen(port: int, timeout: float = 60.0) -> None:
 
 
 def _ensure_sipp() -> Path:
+    """Locate a SIPp binary or container image.
+
+    Priority:
+      1. ``E2E_SIPP_IMAGE`` env (use container — required for TLS/PCAP).
+      2. local ``./sipp`` symlink/binary.
+      3. system ``sipp`` in PATH (linked to ./sipp).
+
+    Returns the path to a SIPp binary, or ``Path("@image:<ref>")`` to signal
+    that callers should run via ``podman run``.
+    """
+    img = os.environ.get("E2E_SIPP_IMAGE")
+    if img:
+        return Path(f"@image:{img}")
     if SIPP_BIN.exists() and os.access(SIPP_BIN, os.X_OK):
         return SIPP_BIN
-    url = (
-        f"https://github.com/SIPp/sipp/releases/download/v{SIPP_VERSION}/"
-        f"sipp-{SIPP_VERSION}.tar.gz"
-    )
-    # Easier: use system sipp if available
     sys_sipp = shutil.which("sipp")
     if sys_sipp:
         SIPP_BIN.symlink_to(sys_sipp)
         return SIPP_BIN
     raise RuntimeError(
         f"SIPp binary not found at {SIPP_BIN} and not in PATH. "
-        f"Install sipp or place a static binary at {SIPP_BIN}. "
-        f"See {url}"
+        f"Either build the container image (cd tests/sipp-image && make build) "
+        f"and set E2E_SIPP_IMAGE=localhost/sipp:dev, or install sipp."
     )
 
 
@@ -184,11 +192,52 @@ def _kamcmd(*args: str) -> str:
 
 
 class SippRunner:
-    """Run a SIPp scenario and assert on its result."""
+    """Run a SIPp scenario and assert on its result.
+
+    `sipp_bin` may be either a local executable path or a sentinel of the
+    form ``@image:<ref>`` returned by :func:`_ensure_sipp`. In the latter
+    case commands are wrapped in ``podman run --rm --network host`` and the
+    scenarios + cert directories are mounted read-only.
+    """
 
     def __init__(self, sipp_bin: Path, scenarios_dir: Path):
         self.sipp = sipp_bin
         self.scenarios = scenarios_dir
+        s = str(sipp_bin)
+        if s.startswith("@image:"):
+            self.image = s[len("@image:") :]
+        else:
+            self.image = None
+
+    def _wrap_cmd(self, args: list[str], *, container_name: str | None = None) -> list[str]:
+        if not self.image:
+            return args
+        cert_dir = E2E_DIR / "kamailio-cert" / "files"
+        rewritten: list[str] = []
+        for a in args:
+            if a.startswith(str(self.scenarios)):
+                rewritten.append(a.replace(str(self.scenarios), "/scn"))
+            elif a.startswith(str(cert_dir)):
+                rewritten.append(a.replace(str(cert_dir), "/tls"))
+            elif a.startswith(str(E2E_DIR)):
+                rewritten.append(a.replace(str(E2E_DIR), "/logs"))
+            else:
+                rewritten.append(a)
+        wrapper = [
+            "podman", "run", "--rm", "--network", "host",
+            "--userns=keep-id",
+            # lowercase :z = shared SELinux relabel (multi-container).  The
+            # compose stack already uses :Z which assigns a unique MCS pair,
+            # so we can't relabel exclusively here without locking the dirs
+            # out of the other containers.
+            "-v", f"{self.scenarios}:/scn:ro,z",
+            "-v", f"{cert_dir}:/tls:ro,z",
+            "-v", f"{E2E_DIR}:/logs:z",
+        ]
+        if container_name:
+            wrapper += ["--name", container_name]
+        wrapper += [self.image, *rewritten[1:]]
+        return wrapper
 
     def run(
         self,
@@ -204,6 +253,9 @@ class SippRunner:
         keys: dict[str, str] | None = None,
         log_tag: str | None = None,
         extra: list[str] | None = None,
+        transport: str = "udp",
+        tls_cert: Path | None = None,
+        tls_key: Path | None = None,
     ) -> subprocess.CompletedProcess:
         tag = log_tag or Path(scenario).stem
         cmd = [
@@ -226,8 +278,19 @@ class SippRunner:
             cmd += ["-s", service]
         for k, v in (keys or {}).items():
             cmd += ["-key", k, v]
+        # Transport selection: u1 = UDP one-socket, t1 = TCP, l1 = TLS (one socket)
+        # Default UDP requires no flag.
+        if transport == "tls":
+            cmd += ["-t", "l1"]
+            if tls_cert:
+                cmd += ["-tls_cert", str(tls_cert)]
+            if tls_key:
+                cmd += ["-tls_key", str(tls_key)]
+        elif transport == "tcp":
+            cmd += ["-t", "t1"]
         if extra:
             cmd += extra
+        cmd = self._wrap_cmd(cmd)
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
     def run_uas_background(
@@ -237,7 +300,7 @@ class SippRunner:
         local_ip: str,
         local_port: int,
         log_tag: str | None = None,
-    ) -> subprocess.Popen:
+    ) -> "_UasHandle":
         tag = log_tag or f"{Path(scenario).stem}_{local_port}"
         log_prefix = E2E_DIR / f"{tag}_uas"
         cmd = [
@@ -250,13 +313,55 @@ class SippRunner:
             "-error_file", f"{log_prefix}.err.log",
             "-screen_file", f"{log_prefix}.screen.log",
         ]
+        container_name = f"e2e-uas-{local_port}" if self.image else None
+        if container_name:
+            # Make sure no leftover container claims the port.
+            subprocess.run(["podman", "rm", "-f", container_name],
+                           capture_output=True)
+        cmd = self._wrap_cmd(cmd, container_name=container_name)
         print(f"$ (bg) {' '.join(cmd)}", flush=True)
-        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return _UasHandle(proc, container_name)
+
+
+class _UasHandle:
+    """Wraps a SIPp UAS process; stops the container too when applicable."""
+    def __init__(self, proc: subprocess.Popen, container_name: str | None):
+        self.proc = proc
+        self.container_name = container_name
+
+    def terminate(self):
+        if self.container_name:
+            subprocess.run(["podman", "stop", "-t", "2", self.container_name],
+                           capture_output=True)
+        self.proc.terminate()
+
+    def wait(self, timeout=None):
+        return self.proc.wait(timeout=timeout)
+
+    def kill(self):
+        if self.container_name:
+            subprocess.run(["podman", "rm", "-f", self.container_name],
+                           capture_output=True)
+        self.proc.kill()
 
 
 @pytest.fixture(scope="session")
 def sipp(stack) -> SippRunner:
     return SippRunner(_ensure_sipp(), E2E_DIR / "sipp_scenarios")
+
+
+@pytest.fixture(scope="session")
+def tls_client_cert():
+    """Path to the (cert, key) pair used by SIPp clients (reuse server's).
+
+    When SIPp runs in the container the harness rewrites these to /tls/...
+    """
+    cert = E2E_DIR / "kamailio-cert" / "files" / "cert.pem"
+    key = E2E_DIR / "kamailio-cert" / "files" / "key.pem"
+    if not cert.exists() or not key.exists():
+        _ensure_tls_cert()
+    return cert, key
 
 
 def wait_udp_listen(port: int, timeout: float = 5.0) -> None:
@@ -278,6 +383,16 @@ def uas_factory(sipp):
     started: list = []
 
     def _start(local_port: int, local_ip: str = "127.0.0.1"):
+        # Wait for the port to actually be free first (previous test may have
+        # just torn down a container holding it).
+        for _ in range(20):
+            out = subprocess.run(
+                ["ss", "-lun", f"sport = :{local_port}"],
+                capture_output=True, text=True,
+            )
+            if f":{local_port}" not in out.stdout:
+                break
+            time.sleep(0.25)
         proc = sipp.run_uas_background(
             "uas_answer.xml",
             local_ip=local_ip,
@@ -285,7 +400,7 @@ def uas_factory(sipp):
             log_tag=f"uas_{local_port}",
         )
         started.append(proc)
-        wait_udp_listen(local_port, timeout=5)
+        wait_udp_listen(local_port, timeout=8)
         return proc
 
     yield _start
@@ -296,3 +411,14 @@ def uas_factory(sipp):
             p.wait(timeout=5)
         except Exception:
             p.kill()
+        # Wait until the OS releases the port so the next test can rebind.
+        if hasattr(p, "container_name") and p.container_name:
+            for _ in range(20):
+                out = subprocess.run(
+                    ["podman", "ps", "-aq", "--filter",
+                     f"name={p.container_name}"],
+                    capture_output=True, text=True,
+                )
+                if not out.stdout.strip():
+                    break
+                time.sleep(0.25)

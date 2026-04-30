@@ -15,12 +15,12 @@
     <![CDATA[
 
       INVITE sip:[service]@[target_domain] SIP/2.0
-      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: "uac" <sip:uac@[local_ip]>;tag=[call_number]
       To: <sip:[service]@[target_domain]>
       Call-ID: [call_id]
       CSeq: 1 INVITE
-      Contact: <sip:uac@[local_ip]:[local_port]>
+      Contact: <sip:uac@[local_ip]:[local_port];transport=[transport]>
       Max-Forwards: 70
       User-Agent: SIPp-UAC-e2e
       Content-Type: application/sdp
@@ -45,12 +45,12 @@
     <![CDATA[
 
       ACK [next_url] SIP/2.0
-      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: "uac" <sip:uac@[local_ip]>;tag=[call_number]
       To: <sip:[service]@[target_domain]>[peer_tag_param]
       Call-ID: [call_id]
       CSeq: 1 ACK
-      Contact: <sip:uac@[local_ip]:[local_port]>
+      Contact: <sip:uac@[local_ip]:[local_port];transport=[transport]>
       Max-Forwards: 70
       [routes]
       Content-Length: 0
@@ -64,12 +64,12 @@
     <![CDATA[
 
       BYE [next_url] SIP/2.0
-      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: "uac" <sip:uac@[local_ip]>;tag=[call_number]
       To: <sip:[service]@[target_domain]>[peer_tag_param]
       Call-ID: [call_id]
       CSeq: 2 BYE
-      Contact: <sip:uac@[local_ip]:[local_port]>
+      Contact: <sip:uac@[local_ip]:[local_port];transport=[transport]>
       Max-Forwards: 70
       [routes]
       Content-Length: 0
