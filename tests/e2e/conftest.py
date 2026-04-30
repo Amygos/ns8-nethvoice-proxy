@@ -200,8 +200,12 @@ class SippRunner:
         calls: int = 1,
         rate: int = 1,
         timeout: int = 30,
+        service: str | None = None,
+        keys: dict[str, str] | None = None,
+        log_tag: str | None = None,
         extra: list[str] | None = None,
     ) -> subprocess.CompletedProcess:
+        tag = log_tag or Path(scenario).stem
         cmd = [
             str(self.sipp),
             target,
@@ -212,12 +216,16 @@ class SippRunner:
             "-trace_err",
             "-trace_msg",
             "-trace_screen",
-            "-message_file", str(E2E_DIR / f"{Path(scenario).stem}.msg.log"),
-            "-error_file", str(E2E_DIR / f"{Path(scenario).stem}.err.log"),
-            "-screen_file", str(E2E_DIR / f"{Path(scenario).stem}.screen.log"),
+            "-message_file", str(E2E_DIR / f"{tag}.msg.log"),
+            "-error_file", str(E2E_DIR / f"{tag}.err.log"),
+            "-screen_file", str(E2E_DIR / f"{tag}.screen.log"),
         ]
         if local_port:
             cmd += ["-p", str(local_port)]
+        if service is not None:
+            cmd += ["-s", service]
+        for k, v in (keys or {}).items():
+            cmd += ["-key", k, v]
         if extra:
             cmd += extra
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -228,8 +236,10 @@ class SippRunner:
         *,
         local_ip: str,
         local_port: int,
+        log_tag: str | None = None,
     ) -> subprocess.Popen:
-        log_prefix = E2E_DIR / f"{Path(scenario).stem}_uas"
+        tag = log_tag or f"{Path(scenario).stem}_{local_port}"
+        log_prefix = E2E_DIR / f"{tag}_uas"
         cmd = [
             str(self.sipp),
             "-sf", str(self.scenarios / scenario),
@@ -247,3 +257,42 @@ class SippRunner:
 @pytest.fixture(scope="session")
 def sipp(stack) -> SippRunner:
     return SippRunner(_ensure_sipp(), E2E_DIR / "sipp_scenarios")
+
+
+def wait_udp_listen(port: int, timeout: float = 5.0) -> None:
+    """Public helper for tests: wait until UDP `port` is bound on host."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        out = subprocess.run(
+            ["ss", "-lun", f"sport = :{port}"], capture_output=True, text=True
+        )
+        if f":{port}" in out.stdout:
+            return
+        time.sleep(0.1)
+    raise TimeoutError(f"UDP :{port} not listening in {timeout}s")
+
+
+@pytest.fixture
+def uas_factory(sipp):
+    """Spawn one or more SIPp UAS instances; clean up automatically."""
+    started: list = []
+
+    def _start(local_port: int, local_ip: str = "127.0.0.1"):
+        proc = sipp.run_uas_background(
+            "uas_answer.xml",
+            local_ip=local_ip,
+            local_port=local_port,
+            log_tag=f"uas_{local_port}",
+        )
+        started.append(proc)
+        wait_udp_listen(local_port, timeout=5)
+        return proc
+
+    yield _start
+
+    for p in started:
+        p.terminate()
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            p.kill()

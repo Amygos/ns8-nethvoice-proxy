@@ -34,8 +34,9 @@ def test_basic_invite_to_pbx1(sipp):
             calls=1,
             rate=1,
             timeout=20,
+            service="1000",
+            keys={"target_domain": "pbx1.local"},
         )
-        # SIPp returns 0 on success, 1 if at least one call failed.
         assert result.returncode == 0, (
             f"UAC failed (rc={result.returncode})\n"
             f"--- stdout ---\n{result.stdout}\n"
