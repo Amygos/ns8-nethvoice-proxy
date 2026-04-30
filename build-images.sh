@@ -6,7 +6,7 @@ set -e
 # Prepare variables for later use
 images=()
 # The image will be pushed to GitHub container registry
-repobase="ghcr.io/nethesis"
+repobase="${REPOBASE:-ghcr.io/nethesis}"
 
 # Configure the image name
 reponame="nethvoice-proxy-postgres"
@@ -47,6 +47,17 @@ buildah bud \
 # Append the image URL to the images array
 images+=("${repobase}/${reponame}")
 
+
+# Build the SIPp helper image (not part of the module deployment, used by
+# the e2e test suite — local pytest harness and Robot Framework tests on a
+# real NS8 node). It is published so CI and operators can pull a known
+# version of SIPp instead of compiling it on the test node.
+reponame="sipp"
+buildah bud \
+	-t "${repobase}/${reponame}" \
+	-t "${repobase}/${reponame}:${IMAGETAG:-latest}" \
+	tests/sipp-image
+images+=("${repobase}/${reponame}")
 
 # Configure the image name
 reponame="nethvoice-proxy"
