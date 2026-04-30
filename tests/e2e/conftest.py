@@ -22,6 +22,9 @@ SIPP_VERSION = "3.7.7"
 SIPP_BIN = E2E_DIR / "sipp"
 COMPOSE_FILE = E2E_DIR / "compose.yml"
 ENV_FILE = E2E_DIR / "env.template"
+NAT_COMPOSE_FILE = E2E_DIR / "compose.nat.yml"
+NAT_ENV_FILE = E2E_DIR / "env.nat.template"
+NAT_PROJECT = "e2e_nat"
 
 
 def _run(cmd, **kw):
@@ -159,6 +162,12 @@ def _kamailio_ready(timeout: float = 90.0) -> None:
 def stack():
     _ensure_sipp()
     _ensure_tls_cert()
+    # NAT stack uses the same host ports — make sure it's gone first.
+    subprocess.run(
+        ["podman-compose", "--env-file", str(NAT_ENV_FILE),
+         "-p", NAT_PROJECT, "-f", str(NAT_COMPOSE_FILE), "down", "-v"],
+        cwd=str(E2E_DIR), capture_output=True,
+    )
     # Clean previous run if any
     _compose("down", "-v")
     rc = _compose("up", "-d").returncode
@@ -422,3 +431,89 @@ def uas_factory(sipp):
                 if not out.stdout.strip():
                     break
                 time.sleep(0.25)
+
+
+def _nat_compose(*args: str) -> subprocess.CompletedProcess:
+    cmd = [
+        "podman-compose",
+        "--env-file", str(NAT_ENV_FILE),
+        "-p", NAT_PROJECT,
+        "-f", str(NAT_COMPOSE_FILE),
+        *args,
+    ]
+    return _run(cmd, cwd=str(E2E_DIR))
+
+
+def _nat_kamailio_alive() -> bool:
+    res = subprocess.run(
+        ["podman", "inspect", "-f", "{{.State.Status}}", "e2e-nat-kamailio"],
+        capture_output=True, text=True,
+    )
+    return res.stdout.strip() == "running"
+
+
+def _nat_kamailio_ready(timeout: float = 90.0) -> None:
+    """Wait for NAT-stack kamailio on PRIVATE_IP:5060."""
+    deadline = time.time() + timeout
+    restarts = 0
+    while time.time() < deadline:
+        out = subprocess.run(
+            ["ss", "-lun", "sport = :5060"], capture_output=True, text=True
+        )
+        if "127.0.0.3:5060" in out.stdout:
+            time.sleep(2.0)
+            return
+        if not _nat_kamailio_alive() and restarts < 5:
+            print(f"nat-kamailio crashed, restarting (attempt {restarts + 1})", flush=True)
+            subprocess.run(["podman", "logs", "--tail=10", "e2e-nat-kamailio"])
+            subprocess.run(["podman", "start", "e2e-nat-kamailio"], check=False)
+            restarts += 1
+            time.sleep(3.0)
+        time.sleep(0.5)
+    raise TimeoutError(f"nat-kamailio not listening on 127.0.0.3:5060 in {timeout}s")
+
+
+@pytest.fixture(scope="session")
+def nat_stack():
+    """Bring up the BEHIND_NAT=true variant in a separate compose project."""
+    _ensure_sipp()
+    _ensure_tls_cert()
+    # Default stack uses the same host ports — make sure it's gone first.
+    _compose("down", "-v")
+    _nat_compose("down", "-v")
+    rc = _nat_compose("up", "-d").returncode
+    if rc != 0:
+        _nat_compose("logs")
+        raise RuntimeError("podman-compose nat up failed")
+    try:
+        _wait_tcp("127.0.0.1", 5432, timeout=60)
+        _wait_tcp("127.0.0.1", 6379, timeout=60)
+        _nat_kamailio_ready(timeout=90)
+        # Reload routes — same dialplan/dispatcher as the default stack.
+        subprocess.run(
+            ["podman", "exec", "e2e-nat-kamailio", "kamcmd", "dialplan.reload"],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["podman", "exec", "e2e-nat-kamailio", "kamcmd", "dispatcher.reload"],
+            capture_output=True,
+        )
+        time.sleep(1.0)
+        yield
+    finally:
+        if os.environ.get("E2E_KEEP_LOGS"):
+            _nat_compose("logs", "kamailio")
+        if not os.environ.get("E2E_NO_TEARDOWN"):
+            _nat_compose("down", "-v")
+
+
+@pytest.fixture
+def nat_sipp(nat_stack) -> SippRunner:
+    return SippRunner(_ensure_sipp(), E2E_DIR / "sipp_scenarios")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Ensure default-stack tests run before NAT-stack tests so each session
+    only brings up one stack at a time (both share host ports 5060/5432/...).
+    """
+    items.sort(key=lambda it: 1 if "test_nat.py" in str(it.fspath) else 0)
