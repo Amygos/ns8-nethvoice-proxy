@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!--
+  Basic UAC: INVITE → wait 100/180 → 200 → ACK → BYE → wait 200.
+  Targets Kamailio (-rsa) which routes to the UAS via the dispatcher.
+  Bind to 127.0.0.2 (so Kamailio sees direction="in").
+-->
+<scenario name="UAC basic call to pbx1.local">
+  <send retrans="500">
+    <![CDATA[
+
+      INVITE sip:1000@pbx1.local SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "uac" <sip:uac@[local_ip]>;tag=[call_number]
+      To: <sip:1000@pbx1.local>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:uac@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      User-Agent: SIPp-UAC-e2e
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=uac 53655765 2353687637 IN IP4 [local_ip]
+      s=-
+      c=IN IP4 [local_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+
+    ]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="200" rrs="true"/>
+
+  <send>
+    <![CDATA[
+
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "uac" <sip:uac@[local_ip]>;tag=[call_number]
+      To: <sip:1000@pbx1.local>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:uac@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      [routes]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <send retrans="500">
+    <![CDATA[
+
+      BYE [next_url] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "uac" <sip:uac@[local_ip]>;tag=[call_number]
+      To: <sip:1000@pbx1.local>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:uac@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      [routes]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="200"/>
+
+  <ResponseTimeRepartition value="10, 20, 50, 100, 200, 500, 1000"/>
+  <CallLengthRepartition   value="100, 200, 500, 1000, 2000"/>
+</scenario>

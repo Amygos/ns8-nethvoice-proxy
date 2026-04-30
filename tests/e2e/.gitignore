@@ -1,0 +1,10 @@
+# Local artefacts (regenerated on each run)
+kamailio-cert/
+sipp
+*.log
+*.msg.log
+*.err.log
+*.screen.log
+.env
+__pycache__/
+.pytest_cache/

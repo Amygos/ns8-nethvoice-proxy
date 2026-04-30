@@ -1,0 +1,95 @@
+version: "3.8"
+
+# Local e2e stack for ns8-nethvoice-proxy.
+# All containers run on the host network so Kamailio + rtpengine can use
+# the full SIP/RTP port set without NAT. SIPp clients also run on the host.
+#
+# Usage:
+#   cp env.template .env  (or rely on env.template via --env-file)
+#   podman-compose --env-file env.template up -d
+#
+# Override image tag:
+#   IMAGE_TAG=1.6.2-testing.3 podman-compose ... up -d
+#
+# Build locally instead of pulling:
+#   BUILD_LOCAL=1 ./run.sh
+
+services:
+  postgres:
+    image: ghcr.io/nethesis/nethvoice-proxy-postgres:${IMAGE_TAG:-latest}
+    container_name: e2e-postgres
+    network_mode: host
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGPORT: ${POSTGRES_PORT}
+    volumes:
+      - ./postgres-init/99_test_routes.sql:/docker-entrypoint-initdb.d/99_test_routes.sql:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -p $$PGPORT"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: ghcr.io/nethesis/nethvoice-proxy-redis:${IMAGE_TAG:-latest}
+    container_name: e2e-redis
+    network_mode: host
+    environment:
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -p $$REDIS_PORT ping | grep -q PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  rtpengine:
+    image: ghcr.io/nethesis/nethvoice-proxy-rtpengine:${IMAGE_TAG:-latest}
+    container_name: e2e-rtpengine
+    network_mode: host
+    environment:
+      PUBLIC_IP: ${PUBLIC_IP}
+      PRIVATE_IP: ${PRIVATE_IP}
+      SERVICE_IP: ${SERVICE_IP}
+      BEHIND_NAT: ${BEHIND_NAT}
+      RTP_PORT_MIN: ${RTP_PORT_MIN}
+      RTP_PORT_MAX: ${RTP_PORT_MAX}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  kamailio:
+    image: ghcr.io/nethesis/nethvoice-proxy-kamailio:${IMAGE_TAG:-latest}
+    container_name: e2e-kamailio
+    network_mode: host
+    environment:
+      ENV: ${ENV}
+      PUBLIC_IP: ${PUBLIC_IP}
+      PRIVATE_IP: ${PRIVATE_IP}
+      SERVICE_IP: ${SERVICE_IP}
+      SERVICE_NET: ${SERVICE_NET}
+      LOCALNETWORKS: ${LOCALNETWORKS}
+      BEHIND_NAT: ${BEHIND_NAT}
+      KML_SERVER_HEADER: ${KML_SERVER_HEADER}
+      KML_UA_HEADER: ${KML_UA_HEADER}
+      KML_SIP_URL: ${KML_SIP_URL}
+      KML_INTERNAL_NETWORK: ${KML_INTERNAL_NETWORK}
+      DEFAULT_CONTACT: ${DEFAULT_CONTACT}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+    volumes:
+      - ./kamailio-cert:/etc/kamailio/tls:Z
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rtpengine:
+        condition: service_started
